@@ -389,8 +389,10 @@ public class TezClient {
    */  
   public synchronized DAGClient submitDAG(DAG dag) throws TezException, IOException {
     if (isSession) {
+      LOG.info("Raajay: Submit DAG using a session");
       return submitDAGSession(dag);
     } else {
+      LOG.info("Raajay: Submit DAG using a application");
       return submitDAGApplication(dag);
     }
   }
@@ -745,6 +747,7 @@ public class TezClient {
   private DAGClient submitDAGApplication(DAG dag)
       throws TezException, IOException {
     ApplicationId appId = createApplication();
+    LOG.info("Raajay: Application created with App-Id = ", appId);
     return submitDAGApplication(appId, dag);
   }
 
