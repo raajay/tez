@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<configuration>
+    <property>
+        <name>tez.lib.uris</name>
+        <value>${fs.default.name}/apps/tez-0.8.0-SNAPSHOT/</value>
+    </property>
+</configuration>
