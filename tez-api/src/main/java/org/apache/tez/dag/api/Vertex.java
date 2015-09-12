@@ -207,12 +207,12 @@ public class Vertex {
   public int getParallelism() {
     return parallelism;
   }
-  
+
   /**
    * Set the number of tasks for this vertex
    * @param parallelism Parallelism for this vertex
    */
-  void setParallelism(int parallelism) {
+  public void setParallelism(int parallelism) {
     this.parallelism = parallelism;
   }
 
