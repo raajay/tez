@@ -81,7 +81,7 @@ public class DAG {
   final BidiMap<String, Vertex> vertices =
       new DualLinkedHashBidiMap<String, Vertex>();
   final Set<Edge> edges = Sets.newHashSet();
-  final String name;
+  private String name;
   final Collection<URI> urisForCredentials = new HashSet<URI>();
   Credentials credentials = new Credentials();
   Set<VertexGroup> vertexGroups = Sets.newHashSet();
@@ -327,6 +327,10 @@ public class DAG {
    */
   public String getName() {
     return this.name;
+  }
+
+  public void setName(String name_) {
+    this.name = name_;
   }
 
   public DAG setConf(String property, String value) {
