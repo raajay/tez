@@ -61,10 +61,7 @@ public class DAGSchedulerNaturalOrderTimeControlled implements DAGScheduler {
 
   private final DAG dag;
   private final EventHandler handler;
-  // Tracks vertex schedule time relative to first vertex startTime 
-  private final Map<String, Long> vertexScheduleTimes = new HashMap<String, Long>();
-  private final startTime;
-  
+
   // Tracks pending events, in case they're not sent immediately.
   private final ListMultimap<String, TaskAttemptEventSchedule> pendingEvents =
       LinkedListMultimap.create();
@@ -74,24 +71,34 @@ public class DAGSchedulerNaturalOrderTimeControlled implements DAGScheduler {
   // Tracks tasks scheduled for a vertex.
   private final Map<String, BitSet> vertexScheduledTasks = new HashMap<String, BitSet>();
 
-  public DAGSchedulerNaturalOrderTimeControlled(DAG dag, EventHandler dispatcher) {
+  // Tracks vertex schedule time relative to first vertex startTime
+  private final Map<String, Long> vertexScheduleTimes = new HashMap<String, Long>();
+  private Long startTime = -1L;
+
+  public DAGSchedulerNaturalOrderTimeControlled(DAG dag,
+      EventHandler dispatcher) {
     this.dag = dag;
     this.handler = dispatcher;
   }
-  
-  public DAGSchedulerNaturalOrderTimeControlled(DAG dag, EventHandler dispatcher, String vertexScheduleFile) {
-    this.dag = dag;
-    this.handler = dispatcher;
-    try (BufferedReader br = new BufferedReader(new FileReader(vertexScheduleFile))) {
-      String vertexTimePair;
 
-      while ((vertexTimePair = br.readLine()) != null) {
+  public DAGSchedulerNaturalOrderTimeControlled(DAG dag,
+      EventHandler dispatcher, String schedule_file) {
+    this(dag, dispatcher);
+    init(schedule_file);
+  }
+
+  protected void init(String schedule_file) {
+    try {
+      BufferedReader reader = new BufferedReader(new FileReader(schedule_file));
+      String vertexTimePair = null;
+      while ((vertexTimePair = reader.readLine()) != null) {
         String[] vt = vertexTimePair.split(":");
-        vertexScheduleTimes.add(vt[0], Long.parseLong(vt[1]));
+        vertexScheduleTimes.put(vt[0], Long.parseLong(vt[1]));
       }
+      reader.close();
     } catch (IOException e) {
       e.printStackTrace();
-    } 
+    }
   }
 
   @Override
@@ -256,15 +263,20 @@ public class DAGSchedulerNaturalOrderTimeControlled implements DAGScheduler {
         }
       }
     }
+
     if (canSchedule) {
-      if (startTime == null)
+      if (startTime < -1) {
         startTime = System.currentTimeMillis();
+      }
+
       Long elapsedTime = System.currentTimeMillis() - startTime;
       Long thresholdTime = vertexScheduleTimes.get(vertex.getName());
-      if (elapsedTime > thresholdTime)
+      if (elapsedTime > thresholdTime) {
         scheduledVertices.add(vertex.getName());
-      else
+      }
+      else {
         canSchedule = false;
+      }
     }
     return canSchedule;
   }
