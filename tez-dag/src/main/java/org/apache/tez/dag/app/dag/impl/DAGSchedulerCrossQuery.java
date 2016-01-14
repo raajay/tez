@@ -62,6 +62,8 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
   private static final Logger LOG =
       LoggerFactory.getLogger(DAGSchedulerCrossQuery.class);
 
+  private static final String SCHEDULE_FOLDER = "/media/raajay/code-netopt/";
+
   private final DAG dag;
   private final EventHandler handler;
 
@@ -109,11 +111,20 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
       String vertexTimePair = null;
       while ((vertexTimePair = reader.readLine()) != null) {
         String[] vt = vertexTimePair.split(":");
+        if(vt.length != 2) {
+          StringBuilder sb = new StringBuilder();
+          sb.append("CQ: Badly formatted line in start time file.");
+          sb.append("File : " + schedule_file);
+          sb.append("Line : " + vertexTimePair);
+          LOG.error(sb.toString());
+          continue;
+        }
         vertexScheduleTimes.put(vt[0], Long.parseLong(vt[1]));
       }
       reader.close();
     } catch (IOException e) {
-      e.printStackTrace();
+      LOG.error("CQ: Reading the schedule file failed. File = " + schedule_file +
+          "\n" + e.getMessage());
     }
   }
 
@@ -127,7 +138,7 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
     this.handler = dispatcher;
 
     init();
-    read("/media/raajay/code-netopt/thumbrule.txt");
+    read(SCHEDULE_FOLDER + dag.getName());
 
     this._event_processor = new PendingDagEventProcessor(this);
     this._executor = new ScheduledThreadPoolExecutor(1);
@@ -361,7 +372,7 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
 
       // If threshold is not defined or if defined sufficient time has passed
       // after start, then add the vertex to the scheduled vertices set.
-      if (thresholdTime == -1L || elapsedTime > thresholdTime) {
+      if (thresholdTime == null || thresholdTime == -1L || elapsedTime > thresholdTime) {
         scheduledVertices.add(vertex.getName());
       }
       else {
@@ -479,16 +490,18 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
 
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
+
+    int counter = 0;
     for(TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
       String name = vertex.getName();
-
       if(_ordering_constraint_satisfied.get(name) &&
           !scheduledVertices.contains(name)) {
         sendEventsForVertex(name);
+        counter++;
       }
-
     }
+    LOG.info("Releasing pending events for " + counter + " vertices on timer trigger.");
   }
 
 }
