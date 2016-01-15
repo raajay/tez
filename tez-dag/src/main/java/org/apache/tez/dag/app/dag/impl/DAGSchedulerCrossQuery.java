@@ -142,7 +142,8 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
 
     this._event_processor = new PendingDagEventProcessor(this);
     this._executor = new ScheduledThreadPoolExecutor(1);
-    this._executor.scheduleAtFixedRate(_event_processor, 5, 5, TimeUnit.SECONDS);
+    // A thread to ping every second for releasing pending events.
+    this._executor.scheduleAtFixedRate(_event_processor, 1, 1, TimeUnit.SECONDS);
   }
 
 
@@ -365,10 +366,10 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
 
       Long thresholdTime = vertexScheduleTimes.get(vertex.getName());
 
-      LOG.info("DelayedLaunch Vertex " + vertex.getName() + ", DagStartTime="
-          + dagStartTime + ",CurrentTime" + currentTime);
-      LOG.info("DelayedLaunch Vertex " + vertex.getName() + ", ElapsedTime="
-          + elapsedTime + ",Threshold=" + thresholdTime);
+      LOG.info("Delayed Launch Log: Vertex " + vertex.getName() + ", DagStartTime = "
+          + dagStartTime + ", CurrentTime = " + currentTime);
+      LOG.info("Delayed Launch Log: Vertex " + vertex.getName() + ", ElapsedTime = "
+          + elapsedTime + ", Threshold = " + thresholdTime);
 
       // If threshold is not defined or if defined sufficient time has passed
       // after start, then add the vertex to the scheduled vertices set.
@@ -491,17 +492,17 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
 
-    int counter = 0;
     for(TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
       String name = vertex.getName();
       if(_ordering_constraint_satisfied.get(name) &&
           !scheduledVertices.contains(name)) {
         sendEventsForVertex(name);
-        counter++;
+        LOG.info("Releasing pending events on timer trigger. " +
+            "Vertex = " + vertex_id +
+            ", Time = " + (System.currentTimeMillis() - dagStartTime));
       }
     }
-    LOG.info("Releasing pending events for " + counter + " vertices on timer trigger.");
   }
 
 }
