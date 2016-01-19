@@ -375,11 +375,14 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
       // after start, then add the vertex to the scheduled vertices set.
       if (thresholdTime == null || thresholdTime == -1L || elapsedTime > thresholdTime) {
         scheduledVertices.add(vertex.getName());
+        LOG.info("Time constraint also satisfied. Scheduling vertex : " + vertex.getName());
       }
       else {
         // Else, do not schedule vertex and notify that we cannot schedule the
         // vertex
         canSchedule = false;
+        LOG.info("Time constraints not satisfied. Holding vertex to be scheduled later."
+            + " Vertex = " + vertex.getName());
       }
     }
     return canSchedule;
@@ -491,16 +494,37 @@ public class DAGSchedulerCrossQuery implements DAGScheduler {
 
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
+    LOG.info("Ping received from self-clocking thread");
+
+    Long elapsedTime = System.currentTimeMillis() - dagStartTime;
 
     for(TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
-      String name = vertex.getName();
-      if(_ordering_constraint_satisfied.get(name) &&
-          !scheduledVertices.contains(name)) {
-        sendEventsForVertex(name);
+
+      if(!_ordering_constraint_satisfied.get(vertex.getName()))
+        continue;
+
+      if(scheduledVertices.contains(vertex.getName()))
+        continue;
+
+      // We consider vertices for which
+      // 1. Vertex has satisfied the ordering requirements
+      // 2. Vertex is not already scheduled
+
+      if(elapsedTime >= vertexScheduleTimes.get(vertex.getName())) {
+
+        sendEventsForVertex(vertex.getName());
+
         LOG.info("Releasing pending events on timer trigger. " +
-            "Vertex = " + vertex_id +
-            ", Time = " + (System.currentTimeMillis() - dagStartTime));
+            ", Name = " + vertex.getName() +
+            ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
+            ", Time = " + elapsedTime);
+      } else {
+
+        LOG.info("Time constraints still not satisfied. Holding for later." +
+            ", Name = " + vertex.getName() +
+            ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
+            ", Time = " + elapsedTime);
       }
     }
   }
