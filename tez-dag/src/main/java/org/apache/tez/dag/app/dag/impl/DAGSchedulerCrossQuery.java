@@ -519,6 +519,9 @@ public class DAGSchedulerCrossQuery implements DAGScheduler, ClockedScheduler {
             ", Name = " + vertex.getName() +
             ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
             ", Time = " + elapsedTime);
+
+        // Update the set of scheduled vertices
+        scheduledVertices.add(vertex.getName());
       } else {
 
         LOG.info("Time constraints still not satisfied. Holding for later." +

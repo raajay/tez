@@ -155,7 +155,7 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
   // TODO Does ordering matter - it currently depends on the order returned by vertex.getOutput*
   @Override
   public void scheduleTask(DAGEventSchedulerUpdate event) {
-    doStuff(event);
+    gateway(event);
   }
 
   /**
@@ -405,11 +405,21 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
   }
 
 
+  /**
+   * {@inheritDoc}
+   * @see ClockedScheduler#clearPendingEvents()
+   */
   public void clearPendingEvents() {
-    doStuff(null);
+    gateway(null);
   }
 
-  private synchronized void doStuff(DAGEventSchedulerUpdate event) {
+  /**
+   * The gateway function to do any kind of processing to internal state of the
+   * scheduler. We synchronize it because we want to avoid race condition
+   * between the clock thread and the main AM thread.
+   * @param event
+   */
+  private synchronized void gateway(DAGEventSchedulerUpdate event) {
     if(null == event) {
       doClearOutPendingEvents();
     } else {
@@ -519,6 +529,9 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
             ", Name = " + vertex.getName() +
             ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
             ", Time = " + elapsedTime);
+
+        // Update the set of scheduled vertices
+        scheduledVertices.add(vertex.getName());
       } else {
 
         LOG.info("Time constraints still not satisfied. Holding for later." +
@@ -528,5 +541,6 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
       }
     }
   }
+
 
 }
