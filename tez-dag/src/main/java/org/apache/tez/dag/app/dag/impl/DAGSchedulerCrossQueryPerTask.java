@@ -57,10 +57,10 @@ import com.google.common.collect.Lists;
  * - generic slow start mechanism across all vertices - independent of the type of edges.
  */
 @SuppressWarnings("rawtypes")
-public class DAGSchedulerCrossQuery implements DAGScheduler, ClockedScheduler {
+public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedScheduler {
 
   private static final Logger LOG =
-      LoggerFactory.getLogger(DAGSchedulerCrossQuery.class);
+      LoggerFactory.getLogger(DAGSchedulerCrossQueryPerTask.class);
 
   private static final String SCHEDULE_FOLDER = "/media/raajay/code-netopt/";
 
@@ -132,7 +132,7 @@ public class DAGSchedulerCrossQuery implements DAGScheduler, ClockedScheduler {
    * @param dag
    * @param dispatcher
    */
-  public DAGSchedulerCrossQuery(DAG dag, EventHandler dispatcher) {
+  public DAGSchedulerCrossQueryPerTask(DAG dag, EventHandler dispatcher) {
 
     this.dag = dag;
     this.handler = dispatcher;
