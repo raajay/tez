@@ -188,6 +188,7 @@ public class DAGSchedulerCrossQuery implements DAGScheduler, ClockedScheduler {
    * @param vertexName
    */
   private void sendEventsForVertex(String vertexName) {
+    LOG.info("Finally sending events for vertex : " + vertexName);
     for (TaskAttemptEventSchedule event : pendingEvents.removeAll(vertexName)) {
       sendEvent(event);
     }
