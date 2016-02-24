@@ -31,14 +31,17 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.tez.dag.api.TaskLocationHint;
 import org.apache.tez.dag.app.dag.DAG;
 import org.apache.tez.dag.app.dag.DAGScheduler;
 import org.apache.tez.dag.app.dag.TaskAttempt;
 import org.apache.tez.dag.app.dag.Vertex;
 import org.apache.tez.dag.app.dag.event.DAGEventSchedulerUpdate;
 import org.apache.tez.dag.app.dag.event.DAGEventSchedulerUpdateTAAssigned;
+import org.apache.tez.dag.app.dag.event.TaskAttemptEvent;
 import org.apache.tez.dag.app.dag.event.TaskAttemptEventSchedule;
 import org.apache.tez.dag.records.TezTaskAttemptID;
+import org.apache.tez.dag.records.TezTaskID;
 import org.apache.tez.dag.records.TezVertexID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,41 +70,60 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
   private final DAG dag;
   private final EventHandler handler;
 
+  private final HashMap<String, String> stage2vertex = new HashMap<>();
+  private final HashMap<String, HashSet<String>> vertex2stage = new HashMap<>();
+
   // Tracks pending events, in case they're not sent immediately.
   private final ListMultimap<String, TaskAttemptEventSchedule> pendingEvents =
+      LinkedListMultimap.create();
+
+  private final ListMultimap<String, TaskAttemptEventSchedule> subStagePendingEvents =
       LinkedListMultimap.create();
 
   // Tracks vertices for which no additional scheduling checks are required. Once in this list, the
   // vertex is considered to be fully scheduled.
   private final Set<String> scheduledVertices = new HashSet<String>();
+  private final Set<String> scheduledSubStages = new HashSet<>();
+  private final HashMap<String, Integer> vertexResponses = new HashMap<>();
 
-  // Track the completed vertices, for which the even has been received
+  // Track the completed vertices, for which the event has been received
   private final Set<String> completedVertices = new HashSet<String>();
 
   // Tracks the tasks scheduled for vertices. That is the tasks for which the
   // schedule event has been already sent
   private final Map<String, BitSet> vertexScheduledTasks = new HashMap<String, BitSet>();
-
+  private final Set<String> subStagesWithStartTimes = new HashSet<>();
   // Tracks vertex schedule time relative to first vertex dagStartTime. Is
   // populated upon construction of the object
-  private Map<String, Long> vertexScheduleTimes;
-
+  private Map<String, Long> scheduleTimes;
   private Long dagStartTime = -1L;
-
   private ScheduledThreadPoolExecutor _executor;
   private PendingDagEventProcessor _event_processor;
   private Map<String, Boolean> _ordering_constraint_satisfied;
 
+  /**
+   * @param dag The dag for which the scheduler is attached
+   * @param dispatcher The dispatches who sends events
+   */
+  public DAGSchedulerCrossQueryPerTask(DAG dag, EventHandler dispatcher) {
+
+    this.dag = dag;
+    this.handler = dispatcher;
+
+    init();
+    read(SCHEDULE_FOLDER + dag.getName());
+
+    this._event_processor = new PendingDagEventProcessor(this);
+    this._executor = new ScheduledThreadPoolExecutor(1);
+    // A thread to ping every second for releasing pending events.
+    this._executor.scheduleAtFixedRate(_event_processor, 1, 1, TimeUnit.SECONDS);
+  }
 
   private void init() {
-    this.vertexScheduleTimes = new HashMap<>();
+    this.scheduleTimes = new HashMap<>();
     this._ordering_constraint_satisfied = new HashMap<>();
-    Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
-    for(TezVertexID vertex_id : dag_vertices.keySet()) {
-      Vertex vertex = dag_vertices.get(vertex_id);
-      String name = vertex.getName();
-      vertexScheduleTimes.put(name, -1L);
-      _ordering_constraint_satisfied.put(name, false);
+    for(Vertex vertex : dag.getVertices().values()) {
+      _ordering_constraint_satisfied.put(vertex.getName(), false);
     }
   }
 
@@ -119,7 +141,7 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
           LOG.error(sb.toString());
           continue;
         }
-        vertexScheduleTimes.put(vt[0], Long.parseLong(vt[1]));
+        scheduleTimes.put(vt[0], Long.parseLong(vt[1]));
       }
       reader.close();
     } catch (IOException e) {
@@ -127,25 +149,6 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
           "\n" + e.getMessage());
     }
   }
-
-  /**
-   * @param dag
-   * @param dispatcher
-   */
-  public DAGSchedulerCrossQueryPerTask(DAG dag, EventHandler dispatcher) {
-
-    this.dag = dag;
-    this.handler = dispatcher;
-
-    init();
-    read(SCHEDULE_FOLDER + dag.getName());
-
-    this._event_processor = new PendingDagEventProcessor(this);
-    this._executor = new ScheduledThreadPoolExecutor(1);
-    // A thread to ping every second for releasing pending events.
-    this._executor.scheduleAtFixedRate(_event_processor, 1, 1, TimeUnit.SECONDS);
-  }
-
 
   @Override
   public void vertexCompleted(Vertex vertex) {
@@ -163,8 +166,8 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
    * A vertex with no "request" will never come here, unless forced with a null
    * value, just to make its BitSet as zero.
    *
-   * @param vertexName
-   * @param taskAttemptID
+   * @param vertexName The vertex of interest
+   * @param taskAttemptID  The task for which requests was made
    */
   private void taskAttemptSeen(String vertexName,
       TezTaskAttemptID taskAttemptID) {
@@ -182,93 +185,19 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
 
   }
 
-
-  /**
-   * Send and remove all the pending events, for a vertex.
-   * @param vertexName
-   */
-  private void sendEventsForVertex(String vertexName) {
-    for (TaskAttemptEventSchedule event : pendingEvents.removeAll(vertexName)) {
+  private int sendEventsForSubStage(String subStageId) {
+    int counter = 0;
+    for(TaskAttemptEventSchedule event : subStagePendingEvents.removeAll(subStageId)) {
       sendEvent(event);
+      counter++;
     }
-  }
-
-
-  /**
-   * Checks whether this vertex has been marked as ready to go in the past
-   * @param vertex
-   * @return Indicator if the vertex is already scheduled.
-   */
-  private boolean vertexAlreadyScheduled(Vertex vertex) {
-    return scheduledVertices.contains(vertex.getName());
-  }
-
-
-  /**
-   * @param vertex
-   * @return
-   */
-  private boolean scheduledTasksForwarded(Vertex vertex) {
-
-    boolean canSchedule = false;
-
-    BitSet scheduledTasks = vertexScheduledTasks.get(vertex.getName());
-    if (scheduledTasks != null) { // At least one request is seen, none if none are seen
-      // or is zero task vertex
-
-      if (scheduledTasks.cardinality() >= vertex.getTotalTasks()) {
-        // All task "request" are seen
-        canSchedule = true;
-      }
-
-    }
-    return canSchedule;
-  }
-
-
-  /**
-   * @param vertex
-   */
-  private void processDownstreamVertices(Vertex vertex) {
-
-    List<Vertex> newlyScheduledVertices = Lists.newLinkedList();
-    Map<Vertex, Edge> outputVertexEdgeMap = vertex.getOutputVertices();
-
-    for (Vertex destVertex : outputVertexEdgeMap.keySet()) {
-
-      if (vertexAlreadyScheduled(destVertex)) { // Nothing to do if already scheduled.
-
-      }
-      else {
-
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Attempting to schedule vertex: " + destVertex.getLogIdentifier() +
-              " due to upstream event from " + vertex.getLogIdentifier());
-        }
-
-        boolean scheduled = trySchedulingVertex(destVertex);
-
-        if (scheduled) {
-          LOG.info("Scheduled vertex: " + destVertex.getLogIdentifier() +
-              " due to upstream event from " + vertex.getLogIdentifier());
-          sendEventsForVertex(destVertex.getName());
-          newlyScheduledVertices.add(destVertex);
-        }
-
-      }
-    }
-
-    // Try scheduling all downstream vertices which were scheduled in this run.
-    // Recurse
-    for (Vertex downStreamVertex : newlyScheduledVertices) {
-      processDownstreamVertices(downStreamVertex);
-    }
+    return counter;
   }
 
 
   /**
    * Process the specified vertex, and add it to the cache of scheduled vertices if it can be scheduled
-   * @param vertex
+   * @param vertex The stage of processing in a DAG
    * @return True/False indicating if vertex can be scheduled (i.e. all
    * conditions are satisfied)
    */
@@ -279,11 +208,8 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     if (vertexScheduledTasks.get(vertex.getName()) == null) {
       // 1.  No scheduled requests seen yet. Do not mark this as ready.
       // 0 task vertices handled elsewhere. DO NOT SCHEDULE
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(
-            "No schedule requests for vertex: " + vertex.getLogIdentifier() + ", Not scheduling");
-      }
-
+      LOG.debug("No schedule requests for vertex: " +
+          vertex.getLogIdentifier() + ", Not scheduling");
       canSchedule = false;
 
     } else {
@@ -291,100 +217,40 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
       Map<Vertex, Edge> inputVertexEdgeMap = vertex.getInputVertices();
 
       if (inputVertexEdgeMap == null || inputVertexEdgeMap.isEmpty()) {
-        // 2. Is a map vertex. Can be scheduled based on ordering constraint
-        // alone.
 
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("No sources for vertex: " + vertex.getLogIdentifier() + ", Scheduling now");
-        }
+        LOG.debug("Encountered a MAP vertex. Name = " + vertex.getName()
+            + ". Ordering is satisfied by default. ");
 
       } else {
-
         // Check if all sources are scheduled.
         for (Vertex srcVertex : inputVertexEdgeMap.keySet()) {
 
-          if (scheduledTasksForwarded(srcVertex)) {
-
-            // 3. This source has already been okayed to be scheduled.
-
-            if (LOG.isDebugEnabled()) {
-              LOG.debug("Trying to schedule: " + vertex.getLogIdentifier() +
-                  ", All tasks forwarded for srcVertex: " + srcVertex.getLogIdentifier() +
-                  ", count: " + srcVertex.getTotalTasks());
-            }
-
-
+          if (scheduledVertices.contains(vertex.getName())) {
+            // 3. This source vertex has already been scheduled. An request
+            // for tasks belonging to this vertex will be responded affirmatively.
+            LOG.debug("Parent " + srcVertex.getName() + " is already scheduled.");
           } else {
 
             // Special case for vertices with 0 tasks. 0 check is sufficient since parallelism cannot increase.
             if (srcVertex.getTotalTasks() == 0) {
               // 4. If parent has zero vertices, it will not satisfy (3)
-
               LOG.info("Vertex: " + srcVertex.getLogIdentifier() + " has 0 tasks. Marking as scheduled");
-
               // this is adding only the parent
               scheduledVertices.add(srcVertex.getName());
-
               taskAttemptSeen(srcVertex.getName(), null);
 
             } else {
-
-              if (LOG.isDebugEnabled()) {
-                LOG.debug(
-                    "Not all sources schedule requests complete while trying to schedule: " +
-                        vertex.getLogIdentifier() + ", For source vertex: " +
-                        srcVertex.getLogIdentifier() + ", Forwarded requests: " +
-                        (vertexScheduledTasks.get(srcVertex.getName()) == null ? "null(0)" :
-                            vertexScheduledTasks.get(srcVertex.getName()).cardinality()) +
-                        " out of " + srcVertex.getTotalTasks());
-              }
-
+              LOG.debug("Parent " + srcVertex.getName() + " is not scheduled.");
               canSchedule = false;
               break;
             }
           }
         } // end for -- over source vertices
-
-      } // end if - not a map
-
-    } // end if - some "request" have been received
+      } // end if else - Current vertex is not a map vertex
+    } // end if - at least one request for a task belonging to this vertex has been received
 
     // Update if ordering constraint has been satisfied
     _ordering_constraint_satisfied.put(vertex.getName(), canSchedule);
-
-    // Add an extra check to see if enough time has elapsed
-    if (canSchedule) {
-      // If time has not been set, set it; happens during the first vertex
-
-      if (dagStartTime == -1L) {
-        Long tmp = System.currentTimeMillis();
-        dagStartTime = tmp;
-      }
-
-      Long currentTime = System.currentTimeMillis();
-      Long elapsedTime = currentTime - dagStartTime;
-
-      Long thresholdTime = vertexScheduleTimes.get(vertex.getName());
-
-      LOG.info("Delayed Launch Log: Vertex " + vertex.getName() + ", DagStartTime = "
-          + dagStartTime + ", CurrentTime = " + currentTime);
-      LOG.info("Delayed Launch Log: Vertex " + vertex.getName() + ", ElapsedTime = "
-          + elapsedTime + ", Threshold = " + thresholdTime);
-
-      // If threshold is not defined or if defined sufficient time has passed
-      // after start, then add the vertex to the scheduled vertices set.
-      if (thresholdTime == null || thresholdTime == -1L || elapsedTime > thresholdTime) {
-        scheduledVertices.add(vertex.getName());
-        LOG.info("Time constraint also satisfied. Scheduling vertex : " + vertex.getName());
-      }
-      else {
-        // Else, do not schedule vertex and notify that we cannot schedule the
-        // vertex
-        canSchedule = false;
-        LOG.info("Time constraints not satisfied. Holding vertex to be scheduled later."
-            + " Vertex = " + vertex.getName());
-      }
-    }
     return canSchedule;
   }
 
@@ -417,9 +283,14 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
    * The gateway function to do any kind of processing to internal state of the
    * scheduler. We synchronize it because we want to avoid race condition
    * between the clock thread and the main AM thread.
-   * @param event
+   * @param event Can be null.
    */
   private synchronized void gateway(DAGEventSchedulerUpdate event) {
+
+    if (dagStartTime == -1L) {
+      dagStartTime = System.currentTimeMillis();
+    }
+
     if(null == event) {
       doClearOutPendingEvents();
     } else {
@@ -427,9 +298,21 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     }
   }
 
+  private String getSubStageName(Vertex vertex, TezTaskID taskId) {
+
+    TaskLocationHint hint = vertex.getTaskLocationHint(taskId);
+    String nodeName = "null";
+
+    if (hint != null && hint.getHosts() != null && hint.getHosts().size() > 0) {
+      nodeName = (String) hint.getHosts().toArray()[0];
+    }
+
+    return vertex.getName() + "-" + nodeName;
+  }
+
   private void doProcessEvent(DAGEventSchedulerUpdate event) {
     // Receiving an event asking with what priority this task has to be
-    // scheduled. If it has to be schedules, a "TaskAttemptEventSchedule" is
+    // scheduled. If it has to be scheduled, a "TaskAttemptEventSchedule" is
     // raised.
 
     TaskAttempt attempt = event.getAttempt();
@@ -442,62 +325,31 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
 
     // Create a response event for this "schedule" request
     TaskAttemptEventSchedule attemptEvent
-      = new TaskAttemptEventSchedule(attempt.getID(), priorityLowLimit,
-          priorityHighLimit);
+        = new TaskAttemptEventSchedule(attempt.getID(), priorityLowLimit,
+        priorityHighLimit);
 
+    // TODO see if this is needed
     taskAttemptSeen(vertex.getName(), attempt.getID());
 
-    if (vertexAlreadyScheduled(vertex)) {
-      // Vertex previously marked ready for scheduling. Means the response can
-      // be sent immediately.
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Scheduling " + attempt.getID() + " between priorityLow: " + priorityLowLimit
-            + " and priorityHigh: " + priorityHighLimit);
-      }
+    // Push the response in the pipeline, it will be cleared out during periodic sweep
+    pendingEvents.put(vertex.getName(), attemptEvent);
+    String subStageId = getSubStageName(vertex, attempt.getTaskID());
+    subStagePendingEvents.put(subStageId, attemptEvent);
+    stage2vertex.put(subStageId, vertex.getName());
+    if(!vertex2stage.containsKey(vertex.getName()))
+      vertex2stage.put(vertex.getName(), new HashSet<String>());
+    vertex2stage.get(vertex.getName()).add(subStageId);
 
-      // Sending immediately.
-      sendEvent(attemptEvent);
 
-      // A new task coming in here could send us over the enough tasks scheduled limit.
-      // We process downstream vertices, to see if any of the "requests" are
-      // pending, and their responses can be sent
-      processDownstreamVertices(vertex);
-
-    } else {
-      // To determine if response if tasks for this vertex can be scheduled.
-
+    if (!scheduledVertices.contains(vertex.getName())) {
+      // To determine if tasks for this vertex can be scheduled.
       if (LOG.isDebugEnabled()) {
         LOG.debug("Attempting to schedule vertex: " + vertex.getLogIdentifier() +
             " due to schedule event");
       }
 
-      boolean scheduled = trySchedulingVertex(vertex);
-
-      if (scheduled) {
-
-        LOG.info("Scheduled vertex: " + vertex.getLogIdentifier());
-
-        // If ready to be scheduled, send out pending events and the current event.
-        // Send events out for this vertex first. Then try scheduling downstream vertices.
-
-        // Send out all pending events for this vertex
-        sendEventsForVertex(vertex.getName());
-        // Send out the current event
-        sendEvent(attemptEvent);
-
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Processing downstream vertices for vertex: " + vertex.getLogIdentifier());
-        }
-
-        // Now that we have decided to send the "response" for this vertex, and
-        // the down stream vertices can now be in scheduled state, we also send
-        // events from down stream vertices.
-        processDownstreamVertices(vertex);
-
-      } else {
-        // Queue the "request" for later processing.
-        pendingEvents.put(vertex.getName(), attemptEvent);
-      }
+      trySchedulingVertex(vertex);
+      // No need to process down stream vertices if no events have been sent
     }
   }
 
@@ -506,40 +358,63 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
     LOG.info("Ping received from self-clocking thread");
 
-    Long elapsedTime = System.currentTimeMillis() - dagStartTime;
-
+    // Update if vertices satisfy ordering constraint, based on new scheduled vertices added in previous clock tick
     for(TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
-
-      if(!_ordering_constraint_satisfied.get(vertex.getName()))
-        continue;
 
       if(scheduledVertices.contains(vertex.getName()))
         continue;
 
-      // We consider vertices for which
-      // 1. Vertex has satisfied the ordering requirements
-      // 2. Vertex is not already scheduled
+      // Note the below function cannot push vertex to scheduled.
+      // It can ensure if ordering is satisfied
+      trySchedulingVertex(vertex);
+      // Since current vertex is not scheduled, no point is exploring
+      // down stream vertices
+    }
 
-      if(elapsedTime >= vertexScheduleTimes.get(vertex.getName())) {
+    Long elapsedTime = System.currentTimeMillis() - dagStartTime;
 
-        sendEventsForVertex(vertex.getName());
+    for(String subStageId : subStagePendingEvents.keySet()) {
+
+      String vertexName = stage2vertex.get(subStageId);
+
+      if(!_ordering_constraint_satisfied.get(vertexName))
+        continue;
+
+      Long stageThreshold = scheduleTimes.containsKey(subStageId) ? scheduleTimes.get(subStageId) : -1L;
+
+      if(elapsedTime >= stageThreshold) {
+
+        int num_events = sendEventsForSubStage(subStageId);
 
         LOG.info("Releasing pending events on timer trigger. " +
-            ", Name = " + vertex.getName() +
-            ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
+            ", Vertex Name = " + vertexName +
+            ", Sub-Stage Name = " + subStageId +
+            ", Threshold = " + stageThreshold +
             ", Time = " + elapsedTime);
 
         // Update the set of scheduled vertices
-        scheduledVertices.add(vertex.getName());
-      } else {
+        scheduledSubStages.add(subStageId);
 
+        int current = vertexResponses.containsKey(vertexName) ? vertexResponses.get(vertexName) : 0;
+        vertexResponses.put(vertexName, current + num_events);
+
+      } else {
         LOG.info("Time constraints still not satisfied. Holding for later." +
-            ", Name = " + vertex.getName() +
-            ", Threshold = " + vertexScheduleTimes.get(vertex.getName()) +
+            ", Vertex Name = " + vertexName +
+            ", Sub Stage Name = " + subStageId +
+            ", Threshold = " + stageThreshold +
             ", Time = " + elapsedTime);
       }
     }
+
+    for(TezVertexID vertex_id : dag_vertices.keySet()) {
+      Vertex vertex = dag_vertices.get(vertex_id);
+      if(vertexResponses.get(vertex.getName()) >= vertex.getTotalTasks()) {
+        scheduledVertices.add(vertex.getName());
+      }
+    }
+
   }
 
 
