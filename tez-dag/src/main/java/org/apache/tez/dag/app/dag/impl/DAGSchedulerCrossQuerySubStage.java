@@ -107,7 +107,9 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
   private ScheduledThreadPoolExecutor _executor;
   private PendingDagEventProcessor _event_processor;
 
+
   /**
+   * Constructor.
    * @param dag The dag for which the scheduler is attached
    * @param dispatcher The dispatches who sends events
    */
@@ -127,6 +129,9 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
   }
 
 
+  /**
+   * Initialize the data structures for the DAGScheduler.
+   */
   private void init() {
     this.startTimes = new HashMap<>();
     this._ordering_constraint_satisfied = new HashMap<>();
@@ -135,6 +140,11 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     }
   }
 
+
+  /**
+   * Read the schedule for each sub-stage written by a client application.
+   * @param schedule_file Location of the schedule file
+   */
   private void read(String schedule_file) {
     try {
       BufferedReader reader = new BufferedReader(new FileReader(schedule_file));
@@ -195,6 +205,11 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
   }
 
 
+  /**
+   * Send the responses for a sub-stage of the DAG
+   * @param subStageId The sub-stage of interest
+   * @return The number of responses sent
+   */
   private int sendEventsForSubStage(String subStageId) {
     int counter = 0;
     for (TaskAttemptEventSchedule event : subStagePendingEvents.removeAll
@@ -315,16 +330,30 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     }
   }
 
-  private String getSubStageName(Vertex vertex, TezTaskID taskId) {
 
+  /**
+   * Get the combination of vertex name and location.
+   * @param vertexName The name of the vertex
+   * @param locationName The name of the location
+   * @return The combination of vertex name and location name
+   */
+  public String combineVertexAndLocationName(String vertexName, String locationName) {
+    return vertexName + "-" + locationName;
+  }
+
+  /**
+   * Get the sub-stage name from vertex and task attempt.
+   * @param vertex The vertex of concern
+   * @param taskId The task ID
+   * @return The sub-stage name
+   */
+  private String getSubStageName(Vertex vertex, TezTaskID taskId) {
     TaskLocationHint hint = vertex.getTaskLocationHint(taskId);
     String nodeName = "null";
-
     if (hint != null && hint.getHosts() != null && hint.getHosts().size() > 0) {
       nodeName = (String) hint.getHosts().toArray()[0];
     }
-
-    return vertex.getName() + "-" + nodeName;
+    return combineVertexAndLocationName(vertex.getName(), nodeName);
   }
 
 
@@ -332,6 +361,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
    * Handle a request for scheduling a task in a DAG. We will queue the attempt
    * request and process it when all the parent vertices are done scheduling,
    * their tasks.
+   * @param event An event requesting scheduling of task
    */
   private void doProcessEvent(DAGEventSchedulerUpdate event) {
 
@@ -377,6 +407,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
    * they satisfy the timing constraint. We also check if the ordering
    * constraint is satisfied for each vertex. Events are cleared at sub-stage
    * granularity.
+   *
    */
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
