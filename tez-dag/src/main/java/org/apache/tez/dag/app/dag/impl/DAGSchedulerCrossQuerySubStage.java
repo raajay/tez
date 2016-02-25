@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -38,7 +37,6 @@ import org.apache.tez.dag.app.dag.TaskAttempt;
 import org.apache.tez.dag.app.dag.Vertex;
 import org.apache.tez.dag.app.dag.event.DAGEventSchedulerUpdate;
 import org.apache.tez.dag.app.dag.event.DAGEventSchedulerUpdateTAAssigned;
-import org.apache.tez.dag.app.dag.event.TaskAttemptEvent;
 import org.apache.tez.dag.app.dag.event.TaskAttemptEventSchedule;
 import org.apache.tez.dag.records.TezTaskAttemptID;
 import org.apache.tez.dag.records.TezTaskID;
@@ -48,7 +46,6 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.LinkedListMultimap;
 import com.google.common.collect.ListMultimap;
-import com.google.common.collect.Lists;
 
 /**
  * Schedules task attempts belonging to downstream vertices only after all attempts belonging to
@@ -60,10 +57,10 @@ import com.google.common.collect.Lists;
  * - generic slow start mechanism across all vertices - independent of the type of edges.
  */
 @SuppressWarnings("rawtypes")
-public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedScheduler {
+public class DAGSchedulerCrossQuerySubStage implements DAGScheduler, ClockedScheduler {
 
   private static final Logger LOG =
-      LoggerFactory.getLogger(DAGSchedulerCrossQueryPerTask.class);
+      LoggerFactory.getLogger(DAGSchedulerCrossQuerySubStage.class);
 
   private static final String SCHEDULE_FOLDER = "/media/raajay/code-netopt/";
 
@@ -73,39 +70,41 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
   private final HashMap<String, String> stage2vertex = new HashMap<>();
   private final HashMap<String, HashSet<String>> vertex2stage = new HashMap<>();
 
-  // Tracks pending events, in case they're not sent immediately.
-  private final ListMultimap<String, TaskAttemptEventSchedule> pendingEvents =
-      LinkedListMultimap.create();
-
+  // Queue to store the responses for each attempt, indexed by sub stage ids
   private final ListMultimap<String, TaskAttemptEventSchedule> subStagePendingEvents =
       LinkedListMultimap.create();
 
-  // Tracks vertices for which no additional scheduling checks are required. Once in this list, the
-  // vertex is considered to be fully scheduled.
-  private final Set<String> scheduledVertices = new HashSet<String>();
-  private final Set<String> scheduledSubStages = new HashSet<>();
+  // Tracks the set of vertices for which all the repsonses have been sent
+  private final Set<String> scheduledVertices = new HashSet<>();
+  // Tracks the number of responses sent for each vertex
   private final HashMap<String, Integer> vertexResponses = new HashMap<>();
-
+  // Tracks the set of sub-stage for which all the repsonses have been sent
+  private final Set<String> scheduledSubStages = new HashSet<>();
   // Track the completed vertices, for which the event has been received
-  private final Set<String> completedVertices = new HashSet<String>();
+  private final Set<String> completedVertices = new HashSet<>();
 
-  // Tracks the tasks scheduled for vertices. That is the tasks for which the
-  // schedule event has been already sent
-  private final Map<String, BitSet> vertexScheduledTasks = new HashMap<String, BitSet>();
-  private final Set<String> subStagesWithStartTimes = new HashSet<>();
-  // Tracks vertex schedule time relative to first vertex dagStartTime. Is
-  // populated upon construction of the object
-  private Map<String, Long> scheduleTimes;
+  // Tracks the attempts seen for each vertex
+  private final Map<String, BitSet> vertexSeenAttempts = new HashMap<String, BitSet>();
+
+  // Keeps track of which vertics have satisfied the ordering constraint
+  private Map<String, Boolean> _ordering_constraint_satisfied;
+
+  // Stores the threshold for each vertex and sub-stage
+  private Map<String, Long> startTimes;
+
+  // Dag Start Time initialized to unused value. Will be set to current
+  // system time, upon receiving the first task attempt
   private Long dagStartTime = -1L;
+
+  // Data structures that provide pointers to the clocking thread.
   private ScheduledThreadPoolExecutor _executor;
   private PendingDagEventProcessor _event_processor;
-  private Map<String, Boolean> _ordering_constraint_satisfied;
 
   /**
    * @param dag The dag for which the scheduler is attached
    * @param dispatcher The dispatches who sends events
    */
-  public DAGSchedulerCrossQueryPerTask(DAG dag, EventHandler dispatcher) {
+  public DAGSchedulerCrossQuerySubStage(DAG dag, EventHandler dispatcher) {
 
     this.dag = dag;
     this.handler = dispatcher;
@@ -119,8 +118,9 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     this._executor.scheduleAtFixedRate(_event_processor, 1, 1, TimeUnit.SECONDS);
   }
 
+
   private void init() {
-    this.scheduleTimes = new HashMap<>();
+    this.startTimes = new HashMap<>();
     this._ordering_constraint_satisfied = new HashMap<>();
     for(Vertex vertex : dag.getVertices().values()) {
       _ordering_constraint_satisfied.put(vertex.getName(), false);
@@ -141,7 +141,7 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
           LOG.error(sb.toString());
           continue;
         }
-        scheduleTimes.put(vt[0], Long.parseLong(vt[1]));
+        startTimes.put(vt[0], Long.parseLong(vt[1]));
       }
       reader.close();
     } catch (IOException e) {
@@ -150,16 +150,18 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     }
   }
 
+
   @Override
   public void vertexCompleted(Vertex vertex) {
     this.completedVertices.add(vertex.getName());
   }
 
-  // TODO Does ordering matter - it currently depends on the order returned by vertex.getOutput*
+
   @Override
   public void scheduleTask(DAGEventSchedulerUpdate event) {
     gateway(event);
   }
+
 
   /**
    * Update the set of tasks for which "request" has arrived for each vertex.
@@ -172,18 +174,17 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
   private void taskAttemptSeen(String vertexName,
       TezTaskAttemptID taskAttemptID) {
 
-    BitSet scheduledTasks = vertexScheduledTasks.get(vertexName);
-
+    BitSet scheduledTasks = vertexSeenAttempts.get(vertexName);
     if (scheduledTasks == null) {
       scheduledTasks = new BitSet();
-      vertexScheduledTasks.put(vertexName, scheduledTasks);
+      vertexSeenAttempts.put(vertexName, scheduledTasks);
     }
-
     if (taskAttemptID != null) { // null for 0 task vertices
       scheduledTasks.set(taskAttemptID.getTaskID().getId());
     }
 
   }
+
 
   private int sendEventsForSubStage(String subStageId) {
     int counter = 0;
@@ -205,7 +206,7 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
 
     boolean canSchedule = true;
 
-    if (vertexScheduledTasks.get(vertex.getName()) == null) {
+    if (vertexSeenAttempts.get(vertex.getName()) == null) {
       // 1.  No scheduled requests seen yet. Do not mark this as ready.
       // 0 task vertices handled elsewhere. DO NOT SCHEDULE
       LOG.debug("No schedule requests for vertex: " +
@@ -310,10 +311,13 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     return vertex.getName() + "-" + nodeName;
   }
 
+
+  /**
+   * Handle a request for scheduling a task in a DAG. We will queue the attempt
+   * request and process it when all the parent vertices are done scheduling,
+   * their tasks.
+   */
   private void doProcessEvent(DAGEventSchedulerUpdate event) {
-    // Receiving an event asking with what priority this task has to be
-    // scheduled. If it has to be scheduled, a "TaskAttemptEventSchedule" is
-    // raised.
 
     TaskAttempt attempt = event.getAttempt();
     Vertex vertex = dag.getVertex(attempt.getVertexID());
@@ -332,7 +336,8 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
     taskAttemptSeen(vertex.getName(), attempt.getID());
 
     // Push the response in the pipeline, it will be cleared out during periodic sweep
-    pendingEvents.put(vertex.getName(), attemptEvent);
+    // Our queues are indexed by the sub-stage id
+
     String subStageId = getSubStageName(vertex, attempt.getTaskID());
     subStagePendingEvents.put(subStageId, attemptEvent);
     stage2vertex.put(subStageId, vertex.getName());
@@ -342,18 +347,20 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
 
 
     if (!scheduledVertices.contains(vertex.getName())) {
-      // To determine if tasks for this vertex can be scheduled.
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Attempting to schedule vertex: " + vertex.getLogIdentifier() +
-            " due to schedule event");
-      }
-
-      trySchedulingVertex(vertex);
       // No need to process down stream vertices if no events have been sent
+      // We just determine if the ordering is satisfied. Events are only
+      // release through pings from the external clock.
+      trySchedulingVertex(vertex);
     }
   }
 
 
+  /**
+   * At each ping from clock, we scan and forward events to be scheduled, if
+   * they satisfy the timing constraint. We also check if the ordering
+   * constraint is satisfied for each vertex. Events are cleared at sub-stage
+   * granularity.
+   */
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
     LOG.info("Ping received from self-clocking thread");
@@ -381,7 +388,7 @@ public class DAGSchedulerCrossQueryPerTask implements DAGScheduler, ClockedSched
       if(!_ordering_constraint_satisfied.get(vertexName))
         continue;
 
-      Long stageThreshold = scheduleTimes.containsKey(subStageId) ? scheduleTimes.get(subStageId) : -1L;
+      Long stageThreshold = startTimes.containsKey(subStageId) ? startTimes.get(subStageId) : -1L;
 
       if(elapsedTime >= stageThreshold) {
 
