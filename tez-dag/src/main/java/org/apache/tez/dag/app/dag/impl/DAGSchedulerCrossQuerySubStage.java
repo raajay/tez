@@ -386,39 +386,26 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     // vertices added in previous clock tick
     for (TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
-
       if (scheduledVertices.contains(vertex.getName()))
         continue;
-
-      // Note the below function cannot push vertex to scheduled.
-      // It can ensure if ordering is satisfied
       trySchedulingVertex(vertex);
-      // Since current vertex is not scheduled, no point is exploring
-      // down stream vertices
     }
 
     Long elapsedTime = System.currentTimeMillis() - dagStartTime;
-
     for (String subStageId : subStagePendingEvents.keySet()) {
-
       String vertexName = stage2vertex.get(subStageId);
-
       if (!_ordering_constraint_satisfied.get(vertexName))
         continue;
-
       Long stageThreshold = startTimes.containsKey(subStageId) ? startTimes
           .get(subStageId) : -1L;
 
       if (elapsedTime >= stageThreshold) {
-
         int num_events = sendEventsForSubStage(subStageId);
-
         LOG.info("Releasing pending events on timer trigger. " +
             ", Vertex Name = " + vertexName +
             ", Sub-Stage Name = " + subStageId +
             ", Threshold = " + stageThreshold +
             ", Time = " + elapsedTime);
-
         // Update the set of scheduled vertices
         scheduledSubStages.add(subStageId);
 
@@ -435,6 +422,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
       }
     }
 
+    // Update scheduled vertices
     for (TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
       if (vertexResponses.get(vertex.getName()) >= vertex.getTotalTasks()) {
