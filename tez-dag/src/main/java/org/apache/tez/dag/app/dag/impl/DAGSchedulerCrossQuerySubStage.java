@@ -153,7 +153,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
           sb.append("CQ: Badly formatted line in start time file.");
           sb.append("File : " + schedule_file);
           sb.append("Line : " + vertexTimePair);
-          LOG.error(sb.toString());
+          LOG.warn(sb.toString());
           continue;
         }
         startTimes.put(vt[0], Long.parseLong(vt[1]));
@@ -240,7 +240,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     if (vertexSeenAttempts.get(vertex.getName()) == null) {
       // 1.  No scheduled requests seen yet. Do not mark this as ready.
       // 0 task vertices handled elsewhere. DO NOT SCHEDULE
-      LOG.info("No schedule requests for vertex: " +
+      LOG.debug("No schedule requests for vertex: " +
           vertex.getLogIdentifier() + ", Not scheduling");
       canSchedule = false;
 
@@ -250,18 +250,18 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
 
       if (inputVertexEdgeMap == null || inputVertexEdgeMap.isEmpty()) {
 
-        LOG.info("Encountered a MAP vertex. Name = " + vertex.getName()
+        LOG.debug("Encountered a MAP vertex. Name = " + vertex.getName()
             + ". Ordering is satisfied by default. ");
 
       } else {
         // Check if all sources are scheduled.
         for (Vertex srcVertex : inputVertexEdgeMap.keySet()) {
 
-          if (scheduledVertices.contains(vertex.getName())) {
+          if (scheduledVertices.contains(srcVertex.getName())) {
             // 3. This source vertex has already been scheduled. An request
             // for tasks belonging to this vertex will be responded
             // affirmatively.
-            LOG.info("Parent " + srcVertex.getName() + " is already " +
+            LOG.debug("Parent " + srcVertex.getName() + " is already " +
                 "scheduled.");
           } else {
 
@@ -269,7 +269,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
             // since parallelism cannot increase.
             if (srcVertex.getTotalTasks() == 0) {
               // 4. If parent has zero vertices, it will not satisfy (3)
-              LOG.info("Vertex: " + srcVertex.getLogIdentifier() + " has 0 " +
+              LOG.debug("Vertex: " + srcVertex.getLogIdentifier() + " has 0 " +
                   "tasks. Marking as scheduled");
               // this is adding only the parent
               scheduledVertices.add(srcVertex.getName());
@@ -420,12 +420,16 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     }
   }
 
-  private void displayOrdering() {
+  private void displayOrderingSatisfiability() {
     StringBuilder sb = new StringBuilder();
     for(String key : _ordering_constraint_satisfied.keySet()) {
-      sb.append(key+":"+_ordering_constraint_satisfied.get(key) + "\n");
+      sb.append(key+":"+_ordering_constraint_satisfied.get(key) + ",");
     }
-    LOG.info("Ordering Constraints:\n" + sb.toString());
+    LOG.info("Ordering Satisfiability: " + sb.toString());
+  }
+
+  private void displayScheduledVertices() {
+    LOG.info("Scheduled vertices: " + scheduledVertices);
   }
 
   private void displayPendingEvents() {
@@ -433,9 +437,16 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     for(String key : subStagePendingEvents.keySet()) {
       sb.append(key+":"+subStagePendingEvents.get(key).size() + ", " );
     }
-    LOG.info("Pending events available for " + sb.toString());
+    LOG.info("Pending Events: " + sb.toString());
   }
 
+  private void displayResponses() {
+    StringBuilder sb = new StringBuilder();
+    for(String key : vertexResponses.keySet()) {
+      sb.append(key+":"+subStagePendingEvents.get(key) + ", " );
+    }
+    LOG.info("Vertex Responses Sent: " + sb.toString());
+  }
 
   /**
    * At each ping from clock, we scan and forward events to be scheduled, if
@@ -446,8 +457,8 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
    */
   private void doClearOutPendingEvents() throws Exception {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
-    LOG.info("Clearing out pending events.");
-    displayOrdering();
+    LOG.debug("Clearing out pending events.");
+//    displayScheduledVertices();
 
     // Update if vertices satisfy ordering constraint, based on new scheduled
     // vertices added in previous clock tick
@@ -458,20 +469,23 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
       trySchedulingVertex(vertex);
     }
 
-    Long elapsedTime = System.currentTimeMillis() - dagStartTime;
+//    displayOrderingSatisfiability();
+//    displayPendingEvents();
+//    displayResponses();
 
-    displayPendingEvents();
+    Long elapsedTime = System.currentTimeMillis() - dagStartTime;
 
     Set<String> sub_stages = subStagePendingEvents.keySet();
     for (String subStageId : sub_stages) {
-      LOG.info("CLEAR: Processing sub-stage: " + subStageId);
+      LOG.debug("CLEAR: Processing sub-stage: " + subStageId);
       String vertexName = stage2vertex.get(subStageId);
+
       if (!_ordering_constraint_satisfied.get(vertexName)) {
-        LOG.info("Ordering constraint not satisfied for : " + vertexName);
+        LOG.debug("Ordering constraint not satisfied for : " + vertexName);
         continue;
       }
       if(scheduledVertices.contains(vertexName)) {
-        LOG.info("Vertex already scheduled : " + vertexName);
+        LOG.debug("Vertex already scheduled : " + vertexName);
         continue;
       }
       Long stageThreshold = startTimes.containsKey(subStageId) ? startTimes
@@ -487,15 +501,13 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
             ", Num Events = " + num_events);
         // Update the set of scheduled vertices
         scheduledSubStages.add(subStageId);
-        LOG.info("Added the sub-stage to the set of scheduled sub-stages");
 
         int current = vertexResponses.containsKey(vertexName) ?
             vertexResponses.get(vertexName) : 0;
         vertexResponses.put(vertexName, current + num_events);
-        LOG.info("Updated the number of responses sent for this sub-stage.");
 
       } else {
-        LOG.info("Time constraints still not satisfied. Holding for later." +
+        LOG.debug("Time constraints still not satisfied. Holding for later." +
             ", Vertex Name = " + vertexName +
             ", Sub Stage Name = " + subStageId +
             ", Threshold = " + stageThreshold +
@@ -507,11 +519,22 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     // Update scheduled vertices
     for (TezVertexID vertex_id : dag_vertices.keySet()) {
       Vertex vertex = dag_vertices.get(vertex_id);
-      if (vertexResponses.get(vertex.getName()) >= vertex.getTotalTasks()) {
+      if(scheduledVertices.contains(vertex.getName()))
+        continue;
+
+      int num_responses = vertexResponses.containsKey(vertex.getName())
+        ? vertexResponses.get(vertex.getName()) : 0;
+
+      if (num_responses >= vertex.getTotalTasks()) {
+        LOG.info("Adding " + vertex.getName() + " to list of scheduled vertices");
         scheduledVertices.add(vertex.getName());
+      } else {
+        LOG.debug("Not all sub-stages of a vertex are scheduled."
+            + " Waiting for more requests. " + vertex.getName());
       }
     }
-    LOG.info("EXIT doClearOutPendingEvents");
+
+    LOG.debug("EXIT doClearOutPendingEvents");
   }
 
 
