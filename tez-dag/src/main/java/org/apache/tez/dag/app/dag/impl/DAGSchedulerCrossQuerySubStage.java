@@ -44,8 +44,6 @@ import org.apache.tez.dag.records.TezVertexID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.LinkedListMultimap;
-import com.google.common.collect.ListMultimap;
 
 /**
  * Schedules task attempts belonging to downstream vertices only after all
@@ -80,16 +78,16 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     subStagePendingEvents = new HashMap<>();
 
   // Tracks the set of vertices for which all the repsonses have been sent
-  private final Set<String> scheduledVertices = new HashSet<>();
+  private Set<String> scheduledVertices = new HashSet<>();
   // Tracks the number of responses sent for each vertex
-  private final HashMap<String, Integer> vertexResponses = new HashMap<>();
+  private HashMap<String, Integer> vertexResponses = new HashMap<>();
   // Tracks the set of sub-stage for which all the repsonses have been sent
-  private final Set<String> scheduledSubStages = new HashSet<>();
+  private Set<String> scheduledSubStages = new HashSet<>();
   // Track the completed vertices, for which the event has been received
-  private final Set<String> completedVertices = new HashSet<>();
+  private Set<String> completedVertices = new HashSet<>();
 
   // Tracks the attempts seen for each vertex
-  private final Map<String, BitSet> vertexSeenAttempts = new HashMap<String,
+  private Map<String, BitSet> vertexSeenAttempts = new HashMap<String,
       BitSet>();
 
   // Keeps track of which vertics have satisfied the ordering constraint
