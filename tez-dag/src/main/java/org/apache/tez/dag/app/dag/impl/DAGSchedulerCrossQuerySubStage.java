@@ -167,6 +167,13 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
           schedule_file +
           "\n" + e.getMessage());
     }
+
+    // Display thresholds
+    StringBuilder sb = new StringBuilder();
+    for(String key : startTimes.keySet()) {
+      sb.append(key+":"+startTimes.get(key)+"\n");
+    }
+    LOG.info(sb.toString());
   }
 
 
@@ -401,6 +408,14 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
     }
   }
 
+  private void displayOrdering() {
+    StringBuilder sb = new StringBuilder();
+    for(String key : _ordering_constraint_satisfied.keySet()) {
+      sb.append(key+":"+_ordering_constraint_satisfied.get(key) + "\n");
+    }
+    LOG.info("Ordering Constraints:\n" + sb.toString());
+  }
+
 
   /**
    * At each ping from clock, we scan and forward events to be scheduled, if
@@ -412,6 +427,7 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
   private void doClearOutPendingEvents() {
     Map<TezVertexID, Vertex> dag_vertices = dag.getVertices();
     LOG.info("Ping received from self-clocking thread");
+    displayOrdering();
 
     // Update if vertices satisfy ordering constraint, based on new scheduled
     // vertices added in previous clock tick
@@ -424,9 +440,14 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
 
     Long elapsedTime = System.currentTimeMillis() - dagStartTime;
     for (String subStageId : subStagePendingEvents.keySet()) {
+
       String vertexName = stage2vertex.get(subStageId);
-      if (!_ordering_constraint_satisfied.get(vertexName))
+
+      if (!_ordering_constraint_satisfied.get(vertexName)) {
+        LOG.info("Ordering constraint not satisfied for : " + vertexName);
         continue;
+      }
+
       Long stageThreshold = startTimes.containsKey(subStageId) ? startTimes
           .get(subStageId) : -1L;
 
@@ -436,7 +457,8 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
             ", Vertex Name = " + vertexName +
             ", Sub-Stage Name = " + subStageId +
             ", Threshold = " + stageThreshold +
-            ", Time = " + elapsedTime);
+            ", Time = " + elapsedTime +
+            ", Num Events = " + num_events);
         // Update the set of scheduled vertices
         scheduledSubStages.add(subStageId);
 
@@ -449,7 +471,8 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
             ", Vertex Name = " + vertexName +
             ", Sub Stage Name = " + subStageId +
             ", Threshold = " + stageThreshold +
-            ", Time = " + elapsedTime);
+            ", Time = " + elapsedTime +
+            ", Num remaining events = " + subStagePendingEvents.get(subStageId).size());
       }
     }
 
