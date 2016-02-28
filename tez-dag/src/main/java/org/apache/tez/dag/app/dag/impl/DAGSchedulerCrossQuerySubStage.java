@@ -477,21 +477,24 @@ public class DAGSchedulerCrossQuerySubStage implements DAGScheduler,
 
     Set<String> sub_stages = subStagePendingEvents.keySet();
     for (String subStageId : sub_stages) {
-      LOG.debug("CLEAR: Processing sub-stage: " + subStageId);
+
+      if(subStagePendingEvents.get(subStageId).size() == 0) {
+        LOG.debug("No pending event for: " + subStageId);
+        continue;
+      }
+
+      LOG.debug("Processing sub-stage: " + subStageId);
       String vertexName = stage2vertex.get(subStageId);
 
       if (!_ordering_constraint_satisfied.get(vertexName)) {
         LOG.debug("Ordering constraint not satisfied for : " + vertexName);
         continue;
       }
-      if(scheduledVertices.contains(vertexName)) {
-        LOG.debug("Vertex already scheduled : " + vertexName);
-        continue;
-      }
+
       Long stageThreshold = startTimes.containsKey(subStageId) ? startTimes
           .get(subStageId) : -1L;
 
-      if (elapsedTime >= stageThreshold) {
+      if (elapsedTime >= stageThreshold || scheduledVertices.contains(vertexName)) {
         int num_events = sendEventsForSubStage(subStageId);
         LOG.info("Releasing pending events on timer trigger. " +
             ", Vertex Name = " + vertexName +
