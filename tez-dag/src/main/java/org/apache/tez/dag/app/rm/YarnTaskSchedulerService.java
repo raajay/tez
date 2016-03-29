@@ -188,7 +188,7 @@ public class YarnTaskSchedulerService extends TaskSchedulerService
         String[] racks,
         Priority priority,
         CRCookie cookie) {
-      super(capability, hosts, racks, priority);
+      super(capability, hosts, racks, priority, false);
       this.cookie = cookie;
     }
 
